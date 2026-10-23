@@ -1,0 +1,4 @@
+{
+  "extends": "./tsconfig.rules.json",
+  "include": ["packages/rules/src/**/*.ts", "packages/local/src/**/*.ts"]
+}

@@ -1,0 +1,70 @@
+/** Rank labels express identity only; their order does not define strength. */
+export const STANDARD_RANKS = Object.freeze([
+  'A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K',
+] as const);
+
+export const SUITS = Object.freeze(['clubs', 'diamonds', 'hearts', 'spades'] as const);
+
+export type StandardRank = (typeof STANDARD_RANKS)[number];
+export type Suit = (typeof SUITS)[number];
+export type DeckCount = 1 | 2;
+export type DeckIndex = 0 | 1;
+
+export type Card =
+  | {
+      readonly cardId: string;
+      readonly deckIndex: DeckIndex;
+      readonly kind: 'standard';
+      readonly rank: StandardRank;
+      readonly suit: Suit;
+    }
+  | {
+      readonly cardId: string;
+      readonly deckIndex: DeckIndex;
+      readonly kind: 'joker';
+      readonly suit: 'joker';
+      readonly rank: 'small-joker' | 'big-joker';
+    };
+
+/** Creates an unshuffled physical deck, never a dealing or strength order. */
+export function createDeck(deckCount: DeckCount): readonly Card[] {
+  if (deckCount !== 1 && deckCount !== 2) {
+    throw new RangeError('deckCount must be 1 or 2');
+  }
+
+  const cards: Card[] = [];
+  for (let index = 0; index < deckCount; index += 1) {
+    const deckIndex = index as DeckIndex;
+    for (const suit of SUITS) {
+      for (const rank of STANDARD_RANKS) {
+        cards.push({ cardId: `${index}:${suit}:${rank}`, deckIndex, kind: 'standard', rank, suit });
+      }
+    }
+    for (const rank of ['small-joker', 'big-joker'] as const) {
+      cards.push({ cardId: `${index}:${rank}`, deckIndex, kind: 'joker', suit: 'joker', rank });
+    }
+  }
+  return cards;
+}
+
+/** Checks physical identity, including the suit/rank encoded in cardId. */
+export function isCard(input: unknown): input is Card {
+  if (typeof input !== 'object' || input === null) return false;
+  const card = input as Record<string, unknown>;
+  if (card.deckIndex !== 0 && card.deckIndex !== 1) return false;
+  if (card.kind === 'joker') {
+    return card.suit === 'joker' &&
+      (card.rank === 'small-joker' || card.rank === 'big-joker') &&
+      card.cardId === `${card.deckIndex}:${card.rank}`;
+  }
+  return card.kind === 'standard' &&
+    SUITS.some((suit) => suit === card.suit) &&
+    STANDARD_RANKS.some((rank) => rank === card.rank) &&
+    card.cardId === `${card.deckIndex}:${String(card.suit)}:${String(card.rank)}`;
+}
+
+export function assertUniqueCards(cards: readonly Card[]): void {
+  if (Array.from(cards).some((card) => !isCard(card)) || new Set(cards.map((card) => card.cardId)).size !== cards.length) {
+    throw new RangeError('Invalid or duplicate physical card');
+  }
+}

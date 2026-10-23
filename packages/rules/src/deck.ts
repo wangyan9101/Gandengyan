@@ -1,0 +1,63 @@
+import { assertUniqueCards, createDeck, type Card, type DeckCount } from './card';
+
+export type RandomSource = () => number;
+
+/** Fisher–Yates. Random values must be finite and in [0, 1). Never mutates input. */
+export function shuffle<T>(items: readonly T[], random: RandomSource): readonly T[] {
+  const shuffled = [...items];
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const value = random();
+    if (!Number.isFinite(value) || value < 0 || value >= 1) {
+      throw new RangeError('Random source must return a finite value in [0, 1)');
+    }
+    const swapIndex = Math.floor(value * (index + 1));
+    // Both indices are proven in bounds; T itself may legitimately be undefined.
+    const current = shuffled[index] as T;
+    shuffled[index] = shuffled[swapIndex] as T;
+    shuffled[swapIndex] = current;
+  }
+  return shuffled;
+}
+
+export interface DealResult {
+  readonly hands: readonly (readonly Card[])[];
+  /** Undealt, hidden draw pile. Index 0 is the next card. */
+  readonly drawPile: readonly Card[];
+}
+
+export function validateSeats(playerCount: number, dealerIndex: number): void {
+  if (!Number.isInteger(playerCount) || playerCount < 2 || playerCount > 8 ||
+      !Number.isInteger(dealerIndex) || dealerIndex < 0 || dealerIndex >= playerCount) {
+    throw new RangeError('Expected 2–8 players and a valid dealer index');
+  }
+}
+
+/** Deals five clockwise rounds starting at dealer, then one extra card to dealer. */
+export function dealCards(cards: readonly Card[], playerCount: number, dealerIndex: number): DealResult {
+  validateSeats(playerCount, dealerIndex);
+  assertUniqueCards(cards);
+  if (cards.length !== 54 && cards.length !== 108) throw new RangeError('Expected a full 54/108-card deck');
+  const deckCount = cards.length / 54;
+  if (cards.some((card) => card.deckIndex >= deckCount)) throw new RangeError('Deck index exceeds deck count');
+  const hands: Card[][] = Array.from({ length: playerCount }, () => []);
+  let cursor = 0;
+  const giveCard = (seat: number): void => {
+    const card = cards[cursor];
+    const hand = hands[seat];
+    if (!card || !hand) throw new RangeError('Not enough cards or invalid seat');
+    hand.push({ ...card });
+    cursor += 1;
+  };
+  for (let round = 0; round < 5; round += 1) {
+    for (let offset = 0; offset < playerCount; offset += 1) giveCard((dealerIndex + offset) % playerCount);
+  }
+  giveCard(dealerIndex);
+  return { hands, drawPile: cards.slice(cursor).map((card) => ({ ...card })) };
+}
+
+export function shuffleAndDeal(
+  deckCount: DeckCount, playerCount: number, dealerIndex: number, random: RandomSource,
+): DealResult {
+  validateSeats(playerCount, dealerIndex);
+  return dealCards(shuffle(createDeck(deckCount), random), playerCount, dealerIndex);
+}

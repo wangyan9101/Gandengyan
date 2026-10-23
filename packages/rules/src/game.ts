@@ -1,0 +1,220 @@
+import { assertUniqueCards, createDeck, type Card } from './card';
+import { createRules, DEFAULT_RULES, type RuleConfig } from './config';
+import { shuffleAndDeal, validateSeats, type RandomSource } from './deck';
+import { RANK_ORDER, resolvePlay, type Hand, type HandDeclaration } from './hand';
+import { settleRound, type Settlement } from './score';
+
+export interface PlayerState {
+  readonly playerId: string;
+  readonly hand: readonly Card[];
+}
+
+export interface TablePlay {
+  readonly playerId: string;
+  readonly cardIds: readonly string[];
+  readonly hand: Hand;
+}
+
+/** TRUSTED state only. Contains every private hand; never send this as a public response. */
+export interface GameState {
+  readonly rules: RuleConfig;
+  readonly status: 'playing' | 'finished' | 'awaiting-rule';
+  readonly pendingRule: 'joker-only-lead' | null;
+  readonly version: number;
+  readonly players: readonly PlayerState[];
+  readonly dealerIndex: number;
+  readonly turnIndex: number;
+  readonly drawPile: readonly Card[];
+  readonly discardPile: readonly Card[];
+  readonly table: TablePlay | null;
+  readonly consecutivePasses: number;
+  readonly bombCount: number;
+  readonly settlement: Settlement | null;
+}
+
+export interface GameOptions {
+  readonly playerIds: readonly string[];
+  readonly dealerIndex: number;
+  readonly rules?: RuleConfig;
+}
+
+interface CommandBase {
+  readonly playerId: string;
+  readonly expectedVersion: number;
+}
+
+export type GameCommand =
+  | (CommandBase & { readonly type: 'pass' })
+  | (CommandBase & { readonly type: 'play'; readonly cardIds: readonly string[]; readonly declaration?: HandDeclaration });
+
+export type CommandError = 'invalid-command' | 'game-finished' | 'awaiting-rule' | 'stale-version' |
+  'unknown-player' | 'not-your-turn' | 'cannot-pass' | 'not-owned' | 'invalid-play';
+
+export type CommandResult =
+  | { readonly ok: true; readonly state: GameState }
+  | { readonly ok: false; readonly state: GameState; readonly error: CommandError };
+
+/** Objects created here are acyclic; no mutable caller-owned objects enter a snapshot. */
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === 'object') {
+    Object.keys(value).forEach((key) => deepFreeze((value as Record<string, unknown>)[key]));
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function validPlayerIds(ids: readonly string[]): boolean {
+  return Array.isArray(ids) && Array.from(ids).every((id) => typeof id === 'string' && id.trim().length > 0 && id.length <= 128) &&
+    new Set(ids).size === ids.length;
+}
+
+export function createGame(options: GameOptions, random: RandomSource): GameState {
+  validateSeats(options.playerIds.length, options.dealerIndex);
+  if (!validPlayerIds(options.playerIds)) throw new RangeError('Expected unique, non-empty player IDs');
+  const input = options.rules || DEFAULT_RULES;
+  if (input.version !== DEFAULT_RULES.version) throw new RangeError('Unsupported rules version');
+  const rules = createRules({ deckCount: input.deckCount, allowedBombSizes: input.allowedBombSizes,
+    roundPointCap: input.roundPointCap, straightMinLength: input.straightMinLength,
+    consecutivePairsMinLength: input.consecutivePairsMinLength });
+  const deal = shuffleAndDeal(rules.deckCount, options.playerIds.length, options.dealerIndex, random);
+  const players = options.playerIds.map((playerId, index): PlayerState => {
+    const hand = deal.hands[index];
+    if (!hand) throw new RangeError('Missing dealt hand');
+    return { playerId, hand };
+  });
+  const state: GameState = { rules, status: 'playing', pendingRule: null, version: 0, players,
+    dealerIndex: options.dealerIndex, turnIndex: options.dealerIndex, drawPile: deal.drawPile,
+    discardPile: [], table: null, consecutivePasses: 0, bombCount: 0, settlement: null };
+  assertStateIntegrity(state);
+  return deepFreeze(state);
+}
+
+function isCommand(input: unknown): input is GameCommand {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return false;
+  const value = input as Record<string, unknown>;
+  if (typeof value.playerId !== 'string' || value.playerId.length === 0 ||
+      !Number.isSafeInteger(value.expectedVersion) || (value.expectedVersion as number) < 0) return false;
+  const common = ['type', 'playerId', 'expectedVersion'];
+  if (value.type === 'pass') return Object.keys(value).every((key) => common.indexOf(key) >= 0);
+  if (value.type !== 'play' || !Array.isArray(value.cardIds) || value.cardIds.length === 0 || value.cardIds.length > 24 ||
+      Array.from(value.cardIds).some((id: unknown) => typeof id !== 'string' || id.length === 0 || id.length > 64) ||
+      new Set(value.cardIds).size !== value.cardIds.length ||
+      Object.keys(value).some((key) => [...common, 'cardIds', 'declaration'].indexOf(key) < 0)) return false;
+  if (value.declaration !== undefined) {
+    if (typeof value.declaration !== 'object' || value.declaration === null || Array.isArray(value.declaration)) return false;
+    const declaration = value.declaration as Record<string, unknown>;
+    if (!['single', 'pair', 'straight', 'consecutive-pairs', 'bomb'].some((kind) => kind === declaration.kind) ||
+        !RANK_ORDER.some((rank) => rank === declaration.primaryRank) ||
+        Object.keys(declaration).some((key) => key !== 'kind' && key !== 'primaryRank')) return false;
+  }
+  return true;
+}
+
+/** Caller supplies trusted state and an authenticated player identity bound into the command. */
+export function applyCommand(state: GameState, input: unknown): CommandResult {
+  const reject = (error: CommandError): CommandResult => ({ ok: false, state, error });
+  if (!isCommand(input)) return reject('invalid-command');
+  if (state.status === 'finished') return reject('game-finished');
+  if (state.status === 'awaiting-rule') return reject('awaiting-rule');
+  if (input.expectedVersion !== state.version) return reject('stale-version');
+  const actorIndex = state.players.findIndex((player) => player.playerId === input.playerId);
+  if (actorIndex < 0) return reject('unknown-player');
+  if (actorIndex !== state.turnIndex) return reject('not-your-turn');
+  const actor = state.players[actorIndex];
+  if (!actor) return reject('unknown-player');
+  if (input.type === 'pass') {
+    if (!state.table) return reject('cannot-pass');
+    if (state.consecutivePasses + 1 < state.players.length - 1) {
+      return accept({ ...state, version: state.version + 1, consecutivePasses: state.consecutivePasses + 1,
+        turnIndex: (actorIndex + 1) % state.players.length });
+    }
+    const leaderIndex = state.players.findIndex((player) => player.playerId === state.table?.playerId);
+    const players = state.players.map((player) => ({ playerId: player.playerId, hand: [...player.hand] }));
+    let drawn = 0;
+    for (let offset = 0; offset < players.length; offset += 1) {
+      const card = state.drawPile[drawn];
+      const player = players[(leaderIndex + offset) % players.length];
+      if (card && player) { player.hand.push(card); drawn += 1; }
+    }
+    const leader = players[leaderIndex];
+    const needsRule = Boolean(leader && leader.hand.every((card) => card.kind === 'joker'));
+    return accept({ ...state, players, drawPile: state.drawPile.slice(drawn), table: null,
+      turnIndex: leaderIndex, consecutivePasses: 0, version: state.version + 1,
+      status: needsRule ? 'awaiting-rule' : 'playing', pendingRule: needsRule ? 'joker-only-lead' : null });
+  }
+
+  const selected: Card[] = [];
+  for (const cardId of input.cardIds) {
+    const card = actor.hand.find((owned) => owned.cardId === cardId);
+    if (!card) return reject('not-owned');
+    selected.push(card);
+  }
+  const hand = resolvePlay(selected, state.rules, state.table?.hand || null, input.declaration);
+  if (!hand) return reject('invalid-play');
+  const playedIds = new Set(input.cardIds);
+  const remaining = actor.hand.filter((card) => !playedIds.has(card.cardId));
+  const players = state.players.map((player, index) =>
+    index === actorIndex ? { playerId: player.playerId, hand: remaining } : player);
+  const bombCount = state.bombCount + (hand.kind === 'bomb' ? 1 : 0);
+  const finished = remaining.length === 0;
+  const next: GameState = { ...state, players, bombCount, version: state.version + 1,
+    consecutivePasses: 0, discardPile: [...state.discardPile, ...selected],
+    table: { playerId: actor.playerId, cardIds: [...input.cardIds], hand },
+    turnIndex: finished ? actorIndex : (actorIndex + 1) % players.length,
+    status: finished ? 'finished' : 'playing',
+    settlement: finished ? settleRound(players.map((player) => ({ playerId: player.playerId,
+      remainingCards: player.hand.length })), actor.playerId, bombCount, state.rules.roundPointCap) : null };
+  return accept(next);
+}
+
+function accept(state: GameState): CommandResult {
+  assertStateIntegrity(state);
+  return { ok: true, state: deepFreeze(state) };
+}
+
+/** Debug/persistence check for trusted snapshots; this does not replace authentication. */
+export function assertStateIntegrity(state: GameState): void {
+  validateSeats(state.players.length, state.dealerIndex);
+  if (!validPlayerIds(state.players.map((player) => player.playerId)) ||
+      !Number.isInteger(state.turnIndex) || state.turnIndex < 0 || state.turnIndex >= state.players.length ||
+      !Number.isSafeInteger(state.version) || state.version < 0 ||
+      !Number.isInteger(state.consecutivePasses) || state.consecutivePasses < 0 ||
+      state.consecutivePasses >= state.players.length - 1 ||
+      !Number.isInteger(state.bombCount) || state.bombCount < 0 || state.bombCount > Math.floor(state.discardPile.length / 3)) {
+    throw new RangeError('Invalid game metadata');
+  }
+  const cards: Card[] = [];
+  state.players.forEach((player) => cards.push(...player.hand));
+  cards.push(...state.drawPile, ...state.discardPile);
+  assertUniqueCards(cards);
+  const original = createDeck(state.rules.deckCount);
+  const originalIds = new Set(original.map((card) => card.cardId));
+  if (cards.length !== original.length || cards.some((card) => !originalIds.has(card.cardId))) {
+    throw new RangeError('Physical card conservation failed');
+  }
+  if (state.table) {
+    const tableCards = state.table.cardIds.map((id) => state.discardPile.find((card) => card.cardId === id));
+    const completeCards: Card[] = [];
+    for (const card of tableCards) {
+      if (!card) throw new RangeError('Table card is not in discards');
+      completeCards.push(card);
+    }
+    const recognized = resolvePlay(completeCards, state.rules, null, state.table.hand);
+    if (!state.players.some((player) => player.playerId === state.table?.playerId) || !recognized ||
+        JSON.stringify(recognized) !== JSON.stringify(state.table.hand)) throw new RangeError('Invalid table interpretation');
+  } else if (state.consecutivePasses !== 0) throw new RangeError('Passes without a table');
+  if (state.status === 'finished') {
+    const winner = state.settlement?.winnerId;
+    if (!winner) throw new RangeError('Missing settlement');
+    const expected = settleRound(state.players.map((player) => ({ playerId: player.playerId,
+      remainingCards: player.hand.length })), winner, state.bombCount, state.rules.roundPointCap);
+    if (JSON.stringify(expected) !== JSON.stringify(state.settlement)) throw new RangeError('Incorrect settlement');
+  } else if (state.settlement !== null || state.players.some((player) => player.hand.length === 0)) {
+    throw new RangeError('Unsettled empty hand or premature settlement');
+  }
+  const leader = state.players[state.turnIndex];
+  if (state.status === 'awaiting-rule') {
+    if (state.pendingRule !== 'joker-only-lead' || state.table || !leader ||
+        leader.hand.some((card) => card.kind !== 'joker')) throw new RangeError('Invalid pending rule');
+  } else if (state.pendingRule !== null) throw new RangeError('Unexpected pending rule');
+}
