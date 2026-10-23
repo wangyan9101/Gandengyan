@@ -1,0 +1,151 @@
+import { encodeClientMessage, parseServerMessage, type ClientMessage, type ServerMessage } from '../../protocol/src';
+import { parseSessionCredentials } from '../../protocol/src';
+
+export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'error';
+export interface NetworkClient {
+  readonly status: ConnectionStatus;
+  readonly selfPlayerId: string | null;
+  connect(url: string): Promise<void>;
+  request(message: ClientMessage): Promise<ServerMessage>;
+  onMessage(listener: (message: ServerMessage) => void): () => void;
+  onStatus(listener: () => void): () => void;
+  close(): void;
+}
+export interface SocketPort { send(data: string): void; close(): void }
+export interface SocketHandlers {
+  readonly message: (data: unknown) => void;
+  readonly close: (code?: number) => void;
+  readonly error: () => void;
+}
+export type SocketFactory = (url: string, handlers: SocketHandlers) => SocketPort;
+export type Schedule = (callback: () => void, milliseconds: number) => () => void;
+
+/** Platform-independent lifecycle, validation and request correlation; no DOM/Node imports. */
+export class SocketNetworkClient implements NetworkClient {
+  public status: ConnectionStatus = 'disconnected';
+  public selfPlayerId: string | null = null;
+  private socket: SocketPort | null = null;
+  private generation = 0;
+  private url = '';
+  private credentials: { readonly playerId: string; readonly token: string } | null = null;
+  private recovery = false;
+  private retryCount = 0;
+  private cancelRetry: (() => void) | null = null;
+  private readonly messages = new Set<(message: ServerMessage) => void>();
+  private readonly statuses = new Set<() => void>();
+  private readonly pending = new Map<string, { resolve: (reply: ServerMessage) => void;
+    reject: (error: Error) => void; cancel: () => void }>();
+  private handshake: { resolve: () => void; reject: (error: Error) => void; cancel: () => void } | null = null;
+  public constructor(private readonly factory: SocketFactory, private readonly schedule: Schedule) {}
+  public onMessage(listener: (message: ServerMessage) => void): () => void {
+    this.messages.add(listener); return () => { this.messages.delete(listener); };
+  }
+  public onStatus(listener: () => void): () => void {
+    this.statuses.add(listener); return () => { this.statuses.delete(listener); };
+  }
+  private notify(): void { this.statuses.forEach((listener) => listener()); }
+  public connect(url: string): Promise<void> {
+    this.close();
+    if (!/^wss?:\/\/[^\s]+$/.test(url)) return Promise.reject(new Error('invalid-address'));
+    if (this.url !== url) this.credentials = null;
+    this.url = url; this.retryCount = 0; this.recovery = this.credentials !== null;
+    return this.open();
+  }
+  private open(): Promise<void> {
+    this.status = 'connecting'; this.notify();
+    const generation = this.generation;
+    return new Promise((resolve, reject) => {
+      this.handshake = { resolve, reject, cancel: this.schedule(() => this.lost(), 5000) };
+      try {
+        this.socket = this.factory(this.url, {
+          message: (input) => { if (generation === this.generation) this.receive(input); },
+          close: (code) => {
+            if (generation !== this.generation) return;
+            if (code === 4000 || code === 4001) { this.credentials = null; this.stop('error'); }
+            else this.lost();
+          },
+          error: () => { if (generation === this.generation) this.lost(); },
+        });
+      } catch { this.lost(); }
+    });
+  }
+  private receive(input: unknown): void {
+    const session = parseSessionCredentials(input);
+    if (session.ok) {
+      const frame = session.value;
+      if (this.recovery) {
+        if (!frame.resumed) return; // Discard the temporary connection's fresh guest credential.
+        if (!this.credentials || frame.selfPlayerId !== this.credentials.playerId || frame.resumeToken !== this.credentials.token) {
+          this.stop('error'); return;
+        }
+        this.recovery = false; this.selfPlayerId = frame.selfPlayerId;
+        this.status = 'connected'; this.retryCount = 0;
+        const handshake = this.handshake; this.handshake = null;
+        handshake?.cancel(); handshake?.resolve(); this.notify();
+        const snapshot = frame.snapshot;
+        if (snapshot) this.messages.forEach((listener) => listener(snapshot));
+      } else if (!frame.resumed && this.status === 'connected' && frame.selfPlayerId === this.selfPlayerId) {
+        this.credentials = { playerId: frame.selfPlayerId, token: frame.resumeToken };
+      } else this.stop('error');
+      return;
+    }
+    const parsed = parseServerMessage(input);
+    if (!parsed.ok) { this.stop('error'); return; }
+    const message = parsed.value;
+    if (message.type === 'welcome') {
+      if (!this.handshake || this.status !== 'connecting') { this.stop('error'); return; }
+      if (this.recovery && this.credentials) {
+        try { this.socket?.send(JSON.stringify({ protocolVersion: 1, type: 'resume', resumeToken: this.credentials.token })); }
+        catch { this.lost(); }
+        return;
+      }
+      this.selfPlayerId = message.selfPlayerId;
+      this.status = 'connected';
+      const handshake = this.handshake; this.handshake = null;
+      handshake.cancel(); handshake.resolve(); this.notify(); return;
+    }
+    if (this.status !== 'connected') { this.stop('error'); return; }
+    if (message.requestId !== null) {
+      const pending = this.pending.get(message.requestId);
+      if (pending) { this.pending.delete(message.requestId); pending.cancel(); pending.resolve(message); }
+    }
+    this.messages.forEach((listener) => listener(message));
+  }
+  public request(message: ClientMessage): Promise<ServerMessage> {
+    if (!this.socket || this.status !== 'connected') return Promise.reject(new Error('not-connected'));
+    if (this.pending.has(message.requestId) || this.pending.size >= 32) return Promise.reject(new Error('request-conflict'));
+    let encoded: string;
+    try { encoded = encodeClientMessage(message); } catch { return Promise.reject(new Error('invalid-message')); }
+    return new Promise((resolve, reject) => {
+      const cancel = this.schedule(() => {
+        this.pending.delete(message.requestId); reject(new Error('request-timeout'));
+        // The command may have committed before its acknowledgement was lost. Recover a snapshot,
+        // never invent a new requestId or automatically replay a play/pass command.
+        if (this.credentials) this.lost();
+      }, 5000);
+      this.pending.set(message.requestId, { resolve, reject, cancel });
+      try { this.socket?.send(encoded); } catch { this.lost(); }
+    });
+  }
+  public close(): void { this.stop('disconnected'); }
+  private lost(): void {
+    if (!this.credentials || this.retryCount >= 10) { this.stop('error'); return; }
+    this.stop('reconnecting');
+    this.recovery = true;
+    const delay = Math.min(250 * 2 ** this.retryCount, 8000); this.retryCount += 1;
+    this.cancelRetry = this.schedule(() => {
+      this.cancelRetry = null;
+      // Opening a retry must not reset its budget, even if the platform factory throws synchronously.
+      void this.open().catch(() => {});
+    }, delay);
+  }
+  private stop(status: ConnectionStatus): void {
+    this.cancelRetry?.(); this.cancelRetry = null;
+    this.generation += 1;
+    const socket = this.socket; this.socket = null;
+    this.status = status; this.selfPlayerId = null;
+    this.handshake?.cancel(); this.handshake?.reject(new Error('connection-failed')); this.handshake = null;
+    this.pending.forEach((pending) => { pending.cancel(); pending.reject(new Error('connection-closed')); });
+    this.pending.clear(); socket?.close(); this.notify();
+  }
+}

@@ -13,6 +13,8 @@
     "profiles",
     "build",
     "tests",
+    "server",
+    "vitest.network.config.mts",
     "vitest.config.mts"
   ]
 }

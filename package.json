@@ -9,16 +9,27 @@
     "test": "vitest run --config vitest.config.mts",
     "test:watch": "vitest --config vitest.config.mts",
     "typecheck": "tsc --project tsconfig.rules.json",
-    "check": "npm run typecheck && npm run typecheck:local && npm test && npm run client:verify",
+    "check": "npm run typecheck && npm run typecheck:local && npm run typecheck:server && npm test && npm run client:verify",
     "check:all": "npm run check && npm run typecheck:client",
     "typecheck:local": "tsc --project tsconfig.local.json",
     "typecheck:client": "tsc --project tsconfig.client.json",
     "client:sync": "node tools/sync-client.mjs",
-    "client:verify": "node tools/sync-client.mjs --check"
+    "client:verify": "node tools/sync-client.mjs --check",
+    "typecheck:server": "tsc --project tsconfig.server.json --noEmit",
+    "server:build": "tsc --project tsconfig.server.json",
+    "server:start": "node build/server/server/src/main.js",
+    "server:dev": "npm run server:build && npm run server:start",
+    "test:network": "vitest run --config vitest.network.config.mts",
+    "check:network": "npm run typecheck:server && npm run test:network"
   },
   "devDependencies": {
+    "@types/node": "24.13.0",
+    "@types/ws": "8.18.2",
     "typescript": "5.9.3",
     "vitest": "4.1.12"
   },
-  "description": "棋牌"
+  "description": "棋牌",
+  "dependencies": {
+    "ws": "8.22.0"
+  }
 }

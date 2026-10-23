@@ -1,5 +1,7 @@
 # Gandengyan（干瞪眼）
 
+当前阶段4.3已接入本地多人实时对局、私有发牌、统一结算与同房续局；运行步骤见 [多人对局指南](docs/MULTIPLAYER.md)。下文阶段3/4.1/4.2说明保留历史阶段边界。
+
 Cocos Creator **3.8.5** 微信多人棋牌游戏工程。当前已提供独立规则引擎、本地真人 + AI 会话和简洁横屏 UI 脚本。仅使用不可兑现娱乐积分。
 
 已实现洗牌发牌、牌型/癞子解释、接牌、轮转过牌、补牌、胜负和积分结算，原规则逻辑保持不变。现有 `assets/scene.scene` 已挂载 LocalGameApp，用户已确认在 Creator 中成功运行；打开该场景即可预览，**不需重复建场景或绑定按钮/手牌节点**，详见 [本地启动与整局验收](docs/LOCAL_PLAY.md)。不接入微信或 CloudBase。仅剩王且需自由领出时按未决规则暂停，不会擅自判胜。
@@ -132,3 +134,26 @@ if (first) {
 当前规则版本为 gdy-default-v1。单机 UI 复用这个版本。Test Seed=2026 可复现整局，0 为随机；固定种子的每次重开牌序相同。仅剩王领出的暂停分支依然保留，需要人工定稿后才能承诺所有可能的牌局均有正常终局。
 
 本期无需配置微信或部署云资源。微信阶段需手动准备 AppID 和开发权限，CloudBase 阶段需准备受控环境、认证与权限规则；SDK 和实时通道待验证后选择。私人手牌不得进入公共数据，联机状态由服务端唯一裁决。
+
+## 阶段4.1：会话与协议
+
+新增 `packages/protocol/`、`packages/session/`、`packages/remote/`，保留原本地真人+AI入口和规则。GameSession支持即时或Promise结果，UI已支持异步等待与旧会话回调隔离。远程适配器仅注入传输，无WebSocket连接或服务端；建房/入房/准备/开局目前只定义协议。详见 [协议与阶段验收](docs/PROTOCOL.md)。
+
+运行 `npm run client:sync` 同步全部五个客户端安全包，再执行 `npm run check:all`。新增目录与脚本的 `.meta` 由 Creator 导入时生成；不修改既有元文件或场景。当前352项测试通过，其中原有322项保持不变；本轮未执行Creator预览或微信真机验收。
+
+## 阶段4.2：本地联机房间
+
+当前已增加本地WebSocket房间大厅，原有单机模式继续保留。在PowerShell设置 `$env:PORT = '8787'` 后执行 `npm run server:dev`，Creator打开现有assets/scene.scene并浏览器预览，主界面进入“本地联机模式”，连接 `ws://127.0.0.1:8787/rooms`。两个窗口分别建房/入房、准备，并实时查看成员状态。完整Windows操作、8人验收与限制见 [本地联机运行指南](docs/LOCAL_NETWORK.md)。
+
+运行 `npm run check:all` 和 `npm run check:network` 验证离线与真实回环网络测试。新增固定运行时依赖ws仅供服务端使用；服务端构建产物忽略，不进入Cocos镜像。此阶段“开始”只锁定大厅，不发牌、不进行联机出牌或结算；没有CloudBase或账号登录。上文阶段4.1“无服务端”属于历史状态。
+
+## 阶段4.3：真实多人对局
+
+启动 `npm run server:dev`，同步客户端后用Creator预览已有assets/scene.scene；2～8个独立窗口连接、建房/加入、准备后由房主开始，服务器统一洗牌发牌，自动进入原牌桌。结束后各自回房准备，由房主开下一局，上一局赢家任庄。原单机真人+AI保持可用。规则源码、场景和既有.meta未改；未决剩王局仍暂停。
+
+`npm run check:all`：396项离线测试及全部类型/镜像检查通过；`npm run check:network`：8项真实WebSocket测试通过，包含2/6/8人单双副牌整局与续局，六人双副额外完成第二整局。阶段4.3人工Cocos/微信/跨设备验收、断线恢复与持久化未完成。完整Windows步骤、安全边界和限制见 [MULTIPLAYER.md](docs/MULTIPLAYER.md)。
+## 阶段4.4：恢复与可靠性
+
+已增加同客户端原房间/本人手牌恢复、WebSocket有限自动重连、大厅退出与房主接任、超时只提示及跨连接幂等。424项离线测试（保留原322项，含验收时补充的牌桌/大厅导航回归）和16项真实WebSocket测试通过，类型检查、镜像与服务端构建通过；Creator人工/微信真机仍需验收。恢复凭证仅内存，刷新或服务重启不恢复；全员离线后保留30分钟。
+
+当前Windows启动、退出/断线验收、BUG清单与风险见 [RELIABILITY.md](docs/RELIABILITY.md)。后续云函数、数据库权限、事务与本人监听方案见 [CLOUDBASE_MIGRATION.md](docs/CLOUDBASE_MIGRATION.md)，仅设计，未连接或部署腾讯云。前文各阶段测试数量与限制为历史记录。

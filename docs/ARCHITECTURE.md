@@ -16,17 +16,17 @@
 | --- | --- | --- | --- |
 | Cocos 表现 | `assets/scripts/presentation/` | LocalGameApp、UI 工具、复用手牌节点；不持有全量状态 | 已实现；场景已挂载，用户确认 Creator 运行成功 |
 | 本地应用 | `packages/local/src/` | AI 候选规划、LocalSession、命令提交与本人/公开投影 | 已实现并测试 |
-| 平台适配 | `assets/scripts/platform/` | 微信登录/分享、网络、生命周期；实现接口 | 规划 |
+| 平台适配 | `assets/scripts/platform/` | 浏览器原生WebSocket适配；微信适配仍规划 | 已实现浏览器适配 |
 | 规则引擎 | `packages/rules/src/` | 牌数据、冻结配置、洗牌发牌、牌型/癞子、接牌、确定性状态转换、结算与投影 | 已实现本阶段 |
-| 公共协议 | `packages/protocol/` | 命令与公开/本人私有 DTO、协议版本；不导出全量状态 | 规划 |
-| 通用会话 | `packages/session/` | 本地/远程会话接口 | 规划 |
-| 远程客户端 | `packages/remote/` | 联机客户端适配器 | 规划 |
-| 权威服务 | `server/` | Node.js + TypeScript + WebSocket；认证、授权、完整状态、随机、幂等、结算与投影 | 规划；后续预留 CloudBase 适配 |
+| 公共协议 | `packages/protocol/` | 命令与公开/本人私有 DTO、协议版本；不导出全量状态 | 已实现 v1 类型、校验与授权投影；见 PROTOCOL.md |
+| 通用会话 | `packages/session/` | 本地/远程会话接口与本人提示 | 已实现 |
+| 远程客户端 | `packages/remote/` | 联机客户端适配器 | 已接入浏览器WebSocket及真实牌桌；自动重连仍规划 |
+| 权威服务 | `server/` | Node.js + TypeScript + WebSocket；认证、授权、完整状态、随机、幂等、结算与投影 | 已实现本地大厅、权威对局和内存单局账本；持久化与CloudBase仍规划 |
 | 测试 | `tests/rules/` | 无 Creator 环境的规则单元测试、动作序列守恒与投影验证 | 已实现本阶段 |
 
 依赖方向：表现 → 应用 → 会话接口；本地适配器 → 规则引擎；远程适配器 → 协议/传输；权威服务 → 规则引擎、协议与持久化接口。规则引擎不反向依赖任何一层，也不导入 `cc`、`cc/env`、`db://`、`wx`、云 SDK、文件系统或网络。
 
-规则包以 TS 源码和独立 tsconfig 存在，不建立 npm workspace 或发布流程。当前 `tools/sync-client.mjs` 把 rules/local 源码同步到 `assets/scripts/generated/{rules,local}/`，仅替换 local 对 rules 的相对导入路径。UI 只导入 assets 内模块，避免 Creator 外部源码解析差异；生成文件禁止手改，并纳入 check 的逐文件一致性校验。同步保留 .meta，不修改旧场景或元文件。微信构建仍留待后续阶段。
+规则包以 TS 源码和独立 tsconfig 存在，不建立 npm workspace 或发布流程。当前 `tools/sync-client.mjs` 把 rules/protocol/session/local/remote 白名单源码同步到 `assets/scripts/generated/`，改写这些包间的相对导入路径，并拒绝非允许模块导入。UI 只导入 assets 内模块，避免 Creator 外部源码解析差异；生成文件禁止手改，并纳入 check 的逐文件一致性校验。同步保留 .meta，不修改旧场景或元文件。微信构建仍留待后续阶段。
 
 ## 3. 单机与联机复用
 
@@ -83,3 +83,23 @@
 额外执行根 `tsconfig.json` 检查发现本机 Creator 引擎声明缺少 WebGPU 类型及部分引擎内部模块声明；移除测试工具参与后仍存在。该检查不是规则检查的前提，不通过不等同于 Creator 构建失败；需在编辑器中另行验证，不修改安装目录或生成声明掩盖问题。
 
 参考：[Vitest 官方文档](https://v4.vitest.dev/guide/)、[TypeScript 模块解析说明](https://www.typescriptlang.org/tsconfig/moduleResolution)。本期固定工具版本，安装结果由根 lockfile 锁定；云平台能力须在集成阶段依据官方文档验证。
+
+## 8. 阶段4.1更新
+
+GameSession 已由 LocalSession 与 RemoteSession 实现，UI 支持同步结果与异步确认；提示候选算法移至 session 层，AI命令选择仍在 local。规则源码未改动，服务端直接复用规则包。协议定义、运行时白名单校验、投影授权边界及已实现/规划范围见 [PROTOCOL.md](PROTOCOL.md)。tsconfig.local 现在严格检查全部五个包；客户端镜像仍无 Node 依赖。尚无服务端、真实房间、网络连接或自动重连。
+
+## 阶段4.2本地房间
+
+新增server/src的连接网关与同步权威房间服务，状态仅保存在服务端内存。NetworkClient抽象隔离浏览器WebSocket，LobbyClient消费白名单房间快照；Cocos增加联机表单和等待大厅，原单机路径保留。服务端构建到忽略的build/server，tsconfig.server独立，Creator根配置排除server与网络测试配置。仅ws为新增运行时依赖，客户端镜像无Node依赖。阶段4.1上文“尚无服务端”仅指当时状态，现状及验收见LOCAL_NETWORK.md。
+
+## 阶段4.3多人实时对局
+
+RoomService在可信进程内保存HostedRoom（白名单房间视图、私有GameState、按roundId去重的内存结算记录）。通过安全随机源调用既有createGame/applyCommand，不改rules源码。每个动作同步串行处理并记录requestId回执，再逐连接生成本人投影；public.version与room.version分开。LobbyClient桥接RemoteSession和Cocos原牌桌，广播驱动渲染；新roundId替换旧会话，无联机AI代打。用户确认赢家续庄；续局先重新准备再由房主开始。旧阶段说明仅记录历史，当前操作与实际验收见MULTIPLAYER.md。重连、持久化、微信认证与云端未实现。
+
+## 阶段4.4可靠性更新
+
+上节未实现清单为阶段4.3历史状态。现在RoomService将连接ID映射到保留逻辑身份，以32字节安全随机私有凭证恢复；换连接撤销旧映射，旧socket动作和关闭事件不影响新连接。请求回执、权威GameState及结算账本跟随逻辑身份/房间保留，全员离线30分钟后回收。凭证仅内存；客户端刷新与服务器重启不恢复。
+
+SocketNetworkClient负责最多10次250ms至8s退避、显式close取消、私有恢复帧校验、恢复后完整本人快照；LobbyClient清除旧远程会话，由新快照重建牌桌。失败/超时动作不自动改ID重发。单个连接发送失败不阻断其他成员的广播或回滚已提交状态。操作60秒仅提示，tick使用应用层注入时钟，不改变规则版本、手牌或积分。
+
+大厅退出释放席位/接任房主，对局退出保留，具体确认见RULES。网络与规则仍分层，云函数/仓储接口提取及数据库迁移尚未实现；详细接口、事务、私有投影、权限与监听设计见 [CLOUDBASE_MIGRATION.md](CLOUDBASE_MIGRATION.md)。本阶段无云SDK或云连接。

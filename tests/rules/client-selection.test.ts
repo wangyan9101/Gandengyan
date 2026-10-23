@@ -31,7 +31,7 @@ function createCompiledPresenter(): AppHarness {
     },
     '../generated/local/index': { LocalSession },
     '../generated/rules/index': rules,
-    './card-tile': {}, './ui-kit': {},
+    './card-tile': {}, './ui-kit': {}, './network-lobby': {},
   };
   runInNewContext(compiled, { exports, require: (name: string) => {
     if (!(name in modules)) throw new Error(`Unexpected presenter dependency: ${name}`);

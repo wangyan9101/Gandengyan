@@ -1,9 +1,11 @@
 import {
-  applyCommand, canBeatHand, createGame, createPlayerView, createRules, recognizeHands,
-  type Card, type CommandError, type DeckCount, type GameCommand, type GameState,
+  applyCommand, isCard, createGame, createPlayerView, createRules,
+  type CommandError, type DeckCount, type GameCommand, type GameState,
   type Hand, type HandDeclaration, type RandomSource, type TablePlay,
 } from '../../rules/src';
-import { chooseAiCommand, findLegalPlays, type AiContext, type LegalPlay } from './ai';
+import { chooseAiCommand, type AiContext, type LegalPlay } from './ai';
+import type { SelfGameView } from '../../protocol/src';
+import { selfHint, selectedInterpretations, type GameSession } from '../../session/src';
 
 export const HUMAN_ID = 'human';
 export interface LocalOptions {
@@ -12,7 +14,7 @@ export interface LocalOptions {
   readonly pointCap: number;
 }
 
-export type HumanView = ReturnType<typeof createPlayerView>;
+export type HumanView = SelfGameView;
 export interface LocalSnapshot {
   readonly view: HumanView;
   readonly lastPlay: TablePlay | null;
@@ -32,7 +34,8 @@ const ERROR_MESSAGES: Record<CommandError, string> = {
 };
 
 /** In-process trusted host. The UI only receives human/public projections, never GameState. */
-export class LocalSession {
+export class LocalSession implements GameSession {
+  public readonly selfPlayerId = HUMAN_ID;
   private state: GameState;
   private lastPlay: TablePlay | null = null;
   private message = '你是庄家，请选牌后出牌。';
@@ -49,7 +52,9 @@ export class LocalSession {
   }
 
   public snapshot(): LocalSnapshot {
-    return Object.freeze({ view: createPlayerView(this.state, HUMAN_ID), lastPlay: this.lastPlay, message: this.message });
+    const view = createPlayerView(this.state, HUMAN_ID);
+    return Object.freeze({ view: Object.freeze({ public: view.public,
+      hand: Object.freeze(view.hand.filter(isCard)), selfPlayerId: HUMAN_ID }), lastPlay: this.lastPlay, message: this.message });
   }
 
   public get isHumanTurn(): boolean {
@@ -61,9 +66,7 @@ export class LocalSession {
   }
 
   public selectedInterpretations(cardIds: readonly string[]): readonly Hand[] {
-    const selected = this.selectedCards(cardIds);
-    if (!selected) return [];
-    return recognizeHands(selected, this.state.rules).filter((hand) => canBeatHand(hand, this.state.table?.hand || null));
+    return selectedInterpretations(this.snapshot().view, cardIds);
   }
 
   public play(cardIds: readonly string[], declaration?: HandDeclaration): boolean {
@@ -77,7 +80,7 @@ export class LocalSession {
   }
 
   public hint(): LegalPlay | null {
-    return this.isHumanTurn ? findLegalPlays(this.context(HUMAN_ID))[0] || null : null;
+    return selfHint(this.snapshot().view);
   }
 
   /** One action per call, so rendering owns pacing and restart cancels all outstanding turns. */
@@ -96,17 +99,6 @@ export class LocalSession {
     return { playerId, version: this.state.version,
       hand: this.state.players.find((player) => player.playerId === playerId)?.hand || [],
       rules: this.state.rules, previous: this.state.table?.hand || null };
-  }
-
-  private selectedCards(cardIds: readonly string[]): readonly Card[] | null {
-    const hand = this.state.players[0]?.hand || [];
-    const cards: Card[] = [];
-    for (const id of cardIds) {
-      const card = hand.find((owned) => owned.cardId === id);
-      if (!card) return null;
-      cards.push(card);
-    }
-    return cards;
   }
 
   private submit(command: GameCommand): boolean {

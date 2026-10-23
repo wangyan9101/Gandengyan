@@ -1,0 +1,21 @@
+import { recognizeHands, canBeatHand, type Hand } from '../../rules/src';
+import type { SelfGameView } from '../../protocol/src';
+import { findLegalPlays, type AiContext, type LegalPlay } from './play-assistance';
+
+export function selfContext(view: SelfGameView): AiContext {
+  return { playerId: view.selfPlayerId, version: view.public.version, hand: view.hand,
+    rules: view.public.rules, previous: view.public.table?.hand || null };
+}
+
+export function selfHint(view: SelfGameView): LegalPlay | null {
+  return view.public.status === 'playing' && view.public.turnPlayerId === view.selfPlayerId
+    ? findLegalPlays(selfContext(view))[0] || null : null;
+}
+
+export function selectedInterpretations(view: SelfGameView, cardIds: readonly string[]): readonly Hand[] {
+  if (new Set(cardIds).size !== cardIds.length) return [];
+  const cards = cardIds.map((id) => view.hand.find((card) => card.cardId === id));
+  if (cards.some((card) => card === undefined)) return [];
+  return recognizeHands(cards.filter((card) => card !== undefined), view.public.rules)
+    .filter((hand) => canBeatHand(hand, view.public.table?.hand || null));
+}
